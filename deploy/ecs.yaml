@@ -1,0 +1,189 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ECS Cluster with Service and OTEL Collector
+
+Resources:
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: mini-app-cluster
+
+  # IAM Role for ECS Task Execution
+  ECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ECSExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - cloudwatch:PutMetricData
+                  - ssm:GetParameters
+                Resource: "*"
+
+  # ECS Task Role (for App and OTEL)
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ECSTaskPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:CreateLogGroup
+                Resource: "*"
+
+  OtelConfiguration:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Description: Otel collector configuration for application mini-app-ecs
+      Name: mini-app-ecs-otel-collector-config
+      Tier: Standard
+      Type: String
+      Tags:
+        map-migrated: 8HJ3AJM0OD
+      Value: !Sub |
+        receivers:
+          prometheus:
+            config:
+              scrape_configs: 
+                - job_name: "mini-app-ecs"
+                  scrape_interval: 60s
+                  metrics_path: "/metrics"
+                  static_configs:
+                    - targets: ["localhost:8080"]
+                      labels:
+                        service: "mini-app-ecs"
+                        environment: "test"
+
+        processors:
+          batch:
+            timeout: 10s
+
+        exporters:
+          awsemf:
+            namespace: "mini-app-ecs"
+            dimension_rollup_option: "ZERO_AND_SINGLE_DIMENSION"  # optional
+            region: "eu-central-1"  # z.B. für AWS CloudWatch Region
+
+        service:
+          pipelines:
+            metrics:
+              receivers: [prometheus]
+              processors: [batch]
+              exporters: [awsemf]
+
+  # ECS Task Definition
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: mini-app-task
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: mini-app
+          Image: ghcr.io/andredni/mini-app-ecs/app:latest
+          PortMappings:
+            - ContainerPort: 8080
+              HostPort: 8080
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/mini-app
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: mini-app
+        - Name: otel-collector
+          Image: public.ecr.aws/aws-observability/aws-otel-collector:latest
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/otel-collector
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: otel-collector
+          Command:
+            - "--config=/etc/ecs/otel-collector-config.yaml"
+          Secrets:
+            - Name: "AOT_CONFIG_CONTENT"
+              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mini-app-ecs-otel-collector-config"
+
+  # ECS Service
+  ECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ECSCluster
+      DesiredCount: 1
+      LaunchType: FARGATE
+      TaskDefinition: !Ref ECSTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - subnet-059dbdf2e8080d5df # Replace with your subnet ID
+            - subnet-0f4d8244c8bd7ba75 # Replace with your subnet ID
+          SecurityGroups:
+            - sg-0efe435f7474e90ed # Replace with your security group ID
+          AssignPublicIp: ENABLED
+
+  # CloudWatch Log Group for App
+  MiniAppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/mini-app
+      RetentionInDays: 7
+
+  # CloudWatch Log Group for OTEL Collector
+  OTELCollectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/otel-collector
+      RetentionInDays: 7
+
+Outputs:
+  ECSClusterName:
+    Description: Name of the ECS Cluster
+    Value: !Ref ECSCluster
+
+  ECSServiceName:
+    Description: Name of the ECS Service
+    Value: !Ref ECSService
+
+  LogGroupApp:
+    Description: Log Group for Mini App
+    Value: !Ref MiniAppLogGroup
+
+  LogGroupOTEL:
+    Description: Log Group for OTEL Collector
+    Value: !Ref OTELCollectorLogGroup
