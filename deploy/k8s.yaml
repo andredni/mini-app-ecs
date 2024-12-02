@@ -1,0 +1,62 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: mini-app-ecs
+  name: mini-app-ecs
+  namespace: default
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mini-app-ecs
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mini-app-ecs
+    spec:
+      containers:
+        - image: ghcr.io/andredni/mini-app-ecs/app:latest
+          imagePullPolicy: IfNotPresent
+          name: mini-app-ecs
+          ports:
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
+          resources:
+            limits:
+              cpu: 200m
+              memory: 200Mi
+            requests:
+              cpu: 200m
+              memory: 200Mi
+      restartPolicy: Always
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: mini-app-ecs
+    release: prometheus-operator
+  name: mini-app-ecs
+  namespace: default
+spec:
+  endpoints:
+  - port: metrics
+    scheme: http
+    scrapeTimeout: 10s
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames:
+    - mini-app-ecs
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mini-app-ecs
